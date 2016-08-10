@@ -128,6 +128,7 @@ class BytesBuffer {
 	public #if flash inline #end function addInt32( v : Int ) {
 		#if flash
 		b.writeUnsignedInt(v);
+
 		#else
 		addByte(v&0xFF);
 		addByte((v>>8)&0xFF);
