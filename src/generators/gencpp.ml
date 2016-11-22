@@ -1617,7 +1617,7 @@ and tcpp_to_string_suffix suffix tcpp = match tcpp with
    | TCppRawPointer(constName,valueType) -> constName ^ (tcpp_to_string valueType) ^ "*"
    | TCppFunction(argTypes,retType,abi) ->
         let args = (String.concat "," (List.map tcpp_to_string argTypes)) in
-        "::cpp::Function< " ^ abi ^ " " ^ (tcpp_to_string retType) ^ "(" ^ args ^ ") >"
+        "::cpp::Function< " ^ (tcpp_to_string retType) ^ " " ^ abi ^ " (" ^ args ^ ") >"
    | TCppObjCBlock(argTypes,retType) ->
         (tcpp_objc_block_struct argTypes retType) ^ "::t"
    | TCppDynamicArray -> "::cpp::VirtualArray" ^ suffix
@@ -2241,10 +2241,11 @@ let cpp_template_param path native =
    let path = "::" ^ (join_class_path_remap (path) "::" ) in
    if (native) then
       path
-   else if (path="::Array") then
-      "hx::ArrayBase"
-   else
-      path
+   else match path with
+   | "::Array" -> "hx::ArrayBase"
+   | "::Int" -> "int"
+   | "::Bool" -> "bool"
+   | x -> x
 ;;
 
 
@@ -2506,7 +2507,7 @@ let retype_expression ctx request_type function_args expression_tree forInjectio
                  )
                end
 
-            | FStatic ( _, ({cf_name="::cpp::Function_obj::fromStaticFunction"} as member) ) ->
+            | FStatic ( _, ({cf_name="nativeFromStaticFunction"} as member) ) ->
                let funcReturn = cpp_member_return_type ctx member in
                let exprType = cpp_type_of member.cf_type in
                CppFunction( FuncFromStaticFunction, funcReturn ), exprType
@@ -2588,40 +2589,48 @@ let retype_expression ctx request_type function_args expression_tree forInjectio
             |  TCppObjCBlock(argTypes,retType) ->
                let retypedArgs = retype_function_args args argTypes in
                CppCall( FuncExpression(retypedFunc) ,retypedArgs), retType
+
             | _ ->
-               let retypedArgs = List.map (retype TCppDynamic ) args in
                let cppType = cpp_type_of expr.etype in
                (match retypedFunc.cppexpr with
-               |  CppFunction(FuncFromStaticFunction ,returnType) ->
-                   ( match retypedArgs with
-                   | [ {cppexpr=CppFunction( FuncStatic(clazz,false,member), funcReturn)} ] ->
-                      CppFunctionAddress(clazz,member), funcReturn
-                   | _ -> abort "cpp.Function.fromStaticFunction must be called on static function" expr.epos;
-                   )
-               |  CppEnumIndex(_) ->
-                     (* Not actually a TCall...*)
-                     retypedFunc.cppexpr, retypedFunc.cpptype
-               |  CppFunction( FuncInstance(obj, false, member), args ) when return_type=TCppVoid && is_array_splice_call obj member ->
-                     CppCall( FuncInstance(obj, false, {member with cf_name="removeRange"}), retypedArgs), TCppVoid
-               |  CppFunction( FuncStatic(obj, false, member), _ ) when member.cf_name = "hx::AddressOf" ->
+               | CppFunction(FuncFromStaticFunction ,returnType) ->
+                  let retypedArgs = List.map (retype TCppDynamic ) args in
+                  ( match retypedArgs with
+                  | [ {cppexpr=CppFunction( FuncStatic(clazz,false,member), funcReturn)} ] ->
+                     CppFunctionAddress(clazz,member), funcReturn
+                  | _ -> abort "cpp.Function.fromStaticFunction must be called on static function" expr.epos;
+                  )
+               | CppEnumIndex(_) ->
+                  (* Not actually a TCall...*)
+                  retypedFunc.cppexpr, retypedFunc.cpptype
+
+               | CppFunction( FuncInstance(obj, false, member), _ ) when return_type=TCppVoid && is_array_splice_call obj member ->
+                  let retypedArgs = List.map (retype TCppDynamic ) args in
+                  CppCall( FuncInstance(obj, false, {member with cf_name="removeRange"}), retypedArgs), TCppVoid
+
+               | CppFunction( FuncStatic(obj, false, member), _ ) when member.cf_name = "hx::AddressOf" ->
                     let arg = retype TCppUnchanged (List.hd args) in
                     CppAddressOf(arg), TCppRawPointer("", arg.cpptype)
-               |  CppFunction( FuncStatic(obj, false, member), _ ) when member.cf_name = "_hx_create_array_length" ->
-                    (* gc_stack - not needed yet *)
-                    (match return_type with
-                    | TCppObjectArray _
-                    | TCppScalarArray _ -> CppCall( FuncNew(return_type), retypedArgs), return_type
-                    | _ -> CppCall( FuncNew(TCppDynamicArray), retypedArgs), return_type
-                    )
 
-               |  CppFunction( FuncStatic(obj, false, member), returnType ) when cpp_is_templated_call ctx member ->
-                     (match retypedArgs with
-                     | {cppexpr = CppClassOf(path,native) }::rest ->
-                         CppCall( FuncTemplate(obj,member,path,native), rest), returnType
-                     | _ -> abort "First parameter of template function must be a Class" retypedFunc.cpppos
-                     )
+               | CppFunction( FuncStatic(obj, false, member), _ ) when member.cf_name = "_hx_create_array_length" ->
+                  let retypedArgs = List.map (retype TCppDynamic ) args in
+                  (* gc_stack - not needed yet *)
+                  (match return_type with
+                  | TCppObjectArray _
+                  | TCppScalarArray _ -> CppCall( FuncNew(return_type), retypedArgs), return_type
+                  | _ -> CppCall( FuncNew(TCppDynamicArray), retypedArgs), return_type
+                  )
+
+               | CppFunction( FuncStatic(obj, false, member), returnType ) when cpp_is_templated_call ctx member ->
+                  let retypedArgs = List.map (retype TCppDynamic ) args in
+                  (match retypedArgs with
+                  | {cppexpr = CppClassOf(path,native) }::rest ->
+                      CppCall( FuncTemplate(obj,member,path,native), rest), returnType
+                  | _ -> abort "First parameter of template function must be a Class" retypedFunc.cpppos
+                  )
 
                | CppFunction( FuncInstance(obj,false,member) as func, returnType ) when cpp_can_static_cast returnType cppType ->
+                  let retypedArgs = List.map (retype TCppDynamic ) args in
                   let call = mk_cppexpr (CppCall(func,retypedArgs)) returnType in
                   CppCastStatic(call, cppType), cppType
                   (*
@@ -2640,34 +2649,46 @@ let retype_expression ctx request_type function_args expression_tree forInjectio
                   let retypedArgs = retype_function_args args arg_types in
                   CppCall(func,retypedArgs), returnType
 
-               |  CppFunction(func,returnType) ->
-                     CppCall(func,retypedArgs), returnType
+               | CppFunction(func,returnType) ->
+                  let retypedArgs = List.map (retype TCppDynamic ) args in
+                  CppCall(func,retypedArgs), returnType
 
-               |  CppEnumField(enum, field) ->
-                     CppCall( FuncEnumConstruct(enum,field),retypedArgs), cppType
-               |  CppSuper(_) ->
-                     CppCall( FuncSuperConstruct ,retypedArgs), TCppVoid
-               |  CppDynamicField(expr,name) ->
-                     (* Special function calls *)
-                     (match expr.cpptype, name with
-                     | TCppGlobal, _  ->
-                        CppCall( FuncGlobal(name),retypedArgs), cppType
+               | CppEnumField(enum, field) ->
+                  (* TODO - proper re-typing *)
+                  let retypedArgs = List.map (retype TCppDynamic ) args in
+                  CppCall( FuncEnumConstruct(enum,field),retypedArgs), cppType
 
-                     | TCppString, _  ->
-                        CppCall( FuncInternal(expr,name,"."),retypedArgs), cppType
+               | CppSuper(_) ->
+                  (* TODO - proper re-typing *)
+                  let retypedArgs = List.map (retype TCppDynamic ) args in
+                  CppCall( FuncSuperConstruct ,retypedArgs), TCppVoid
 
-                     | _, "__Tag"  ->
-                        CppCall( FuncInternal(expr,"_hx_getTag","->"),retypedArgs), cppType
+               | CppDynamicField(expr,name) ->
+                  let retypedArgs = List.map (retype TCppDynamic ) args in
+                  (* Special function calls *)
+                  (match expr.cpptype, name with
+                  | TCppGlobal, _  ->
+                     CppCall( FuncGlobal(name),retypedArgs), cppType
 
-                     | _, name when is_internal_member name ->
-                        CppCall( FuncInternal(expr,name,"->"),retypedArgs), cppType
+                  | TCppString, _  ->
+                     CppCall( FuncInternal(expr,name,"."),retypedArgs), cppType
 
-                     | _ -> (* not special *)
-                        CppCall( FuncExpression(retypedFunc), retypedArgs), TCppDynamic
-                     )
+                  | _, "__Tag"  ->
+                     CppCall( FuncInternal(expr,"_hx_getTag","->"),retypedArgs), cppType
+
+                  | _, name when is_internal_member name ->
+                     CppCall( FuncInternal(expr,name,"->"),retypedArgs), cppType
+
+                  | _ -> (* not special *)
+                     CppCall( FuncExpression(retypedFunc), retypedArgs), TCppDynamic
+                  )
+
                |  CppGlobal(_) ->
-                     CppCall( FuncExpression(retypedFunc) ,retypedArgs), cppType
+                  let retypedArgs = List.map (retype TCppDynamic ) args in
+                  CppCall( FuncExpression(retypedFunc) ,retypedArgs), cppType
+
                | _ ->
+                  let retypedArgs = List.map (retype TCppDynamic ) args in
                   CppCall( FuncExpression(retypedFunc), retypedArgs), TCppDynamic
                )
             )
@@ -5764,7 +5785,7 @@ let generate_class_files baseCtx super_deps constructor_deps class_def inScripta
    let generate_script_function isStatic field scriptName callName =
       match follow field.cf_type  with
       | TFun (args,return_type) ->
-         output_cpp ("\nstatic void " ^ scriptName ^ "(hx::CppiaCtx *ctx) {\n");
+         output_cpp ("\nstatic void CPPIA_CALL " ^ scriptName ^ "(hx::CppiaCtx *ctx) {\n");
          let ret = script_signature return_type false in
          if (ret<>"v") then output_cpp ("ctx->return" ^ (script_type return_type false) ^ "(");
          if class_def.cl_interface then begin
@@ -5871,17 +5892,30 @@ let generate_class_files baseCtx super_deps constructor_deps class_def inScripta
       list_iteri dump_script_field functions;
       output_cpp ("};\n\n");
 
-      if (List.length new_sctipt_functions) > 0 then begin
-         let sigs = Hashtbl.create 0 in
+      let sigs = Hashtbl.create 0 in
+
+      let static_functions = (List.filter (fun f-> not (is_data_member f) ) reflect_static_fields) in
+      let all_script_functions = (List.map (fun (f,_,_)->f)  new_sctipt_functions) @ static_functions in
+
+      if (List.length all_script_functions) > 0 then begin
          List.iter (fun (f,_,_) ->
             let s = generate_script_function false f ("__s_" ^f.cf_name) (keyword_remap f.cf_name) in
             Hashtbl.add sigs f.cf_name s
          ) new_sctipt_functions;
 
+         let dump_script_static f =
+            let s = generate_script_function true f ("__s_" ^f.cf_name) (keyword_remap f.cf_name) in
+            Hashtbl.add sigs f.cf_name s
+         in
+         List.iter dump_script_static class_def.cl_ordered_statics;
+
          output_cpp "static hx::ScriptNamedFunction __scriptableFunctions[] = {\n";
-         List.iter (fun (f,_,_) ->
+         let dump_func f isStaticFlag = 
             let s = try Hashtbl.find sigs f.cf_name with Not_found -> "v" in
-            output_cpp ("  hx::ScriptNamedFunction(\"" ^ f.cf_name ^ "\",__s_" ^ f.cf_name ^ ",\"" ^ s ^ "\"),\n" ) ) new_sctipt_functions;
+            output_cpp ("  hx::ScriptNamedFunction(\"" ^ f.cf_name ^ "\",__s_" ^ f.cf_name ^ ",\"" ^ s ^ "\", " ^ isStaticFlag ^ " ),\n" )
+         in
+         List.iter (fun (f,_,_) -> dump_func f "false") new_sctipt_functions;
+         List.iter (fun f -> dump_func f "true") static_functions;
          output_cpp "  hx::ScriptNamedFunction(0,0,0) };\n";
       end else
          output_cpp "static hx::ScriptNamedFunction *__scriptableFunctions = 0;\n";
